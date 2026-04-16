@@ -1,8 +1,8 @@
-name: A股保守推荐 v2.0（周一至周五15:10）
+name: A股 AkShare 保守推荐
 
 on:
   schedule:
-    - cron: '10 7 * * 1-5'
+    - cron: '30 7 * * 1-5'   # 北京时间15:30运行（给AkShare更多时间）
   workflow_dispatch:
 
 jobs:
@@ -17,10 +17,9 @@ jobs:
           python-version: '3.12'
           
       - name: 安装依赖
-        run: pip install tushare pandas requests
+        run: pip install akshare pandas requests
         
-      - name: 运行 v2.0 脚本
+      - name: 运行 AkShare 脚本
         env:
-          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python stock_recommender_conservative_v2.py
+        run: python stock_recommender_akshare.py
