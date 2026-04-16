@@ -1,25 +1,28 @@
-name: A股 AkShare 保守推荐
+name: Daily Stock Recommendation
 
 on:
-  schedule:
-    - cron: '30 7 * * 1-5'   # 北京时间15:30运行（给AkShare更多时间）
   workflow_dispatch:
+  schedule:
+    - cron: '0 15 * * 1-5'
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: 设置 Python
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          
-      - name: 安装依赖
-        run: pip install akshare pandas requests
-        
-      - name: 运行 AkShare 脚本
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install akshare pandas requests
+
+      - name: Run script
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python stock_recommender_akshare.py
+        run: python stock_recommender_conservative_v2.py
