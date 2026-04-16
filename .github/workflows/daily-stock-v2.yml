@@ -1,4 +1,4 @@
-name: Daily Stock Recommendation
+name: 挑战A股
 
 on:
   workflow_dispatch:
