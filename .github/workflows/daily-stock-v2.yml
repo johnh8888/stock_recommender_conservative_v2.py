@@ -3,7 +3,7 @@ name: Daily Stock Recommendation
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 15 * * 1-5'
+    - cron: '30 7 * * 1-5'  # UTC7:30 = 北京时间15:30，收盘后半小时
 
 jobs:
   build:
