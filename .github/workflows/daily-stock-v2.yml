@@ -1,0 +1,26 @@
+name: A股保守推荐 v2.0（周一至周五15:10）
+
+on:
+  schedule:
+    - cron: '10 7 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      - name: 安装依赖
+        run: pip install tushare pandas requests
+        
+      - name: 运行 v2.0 脚本
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python stock_recommender_conservative_v2.py
