@@ -40,7 +40,8 @@ stock_spot = stock_spot.rename(columns={
 })
 
 stock_spot['ts_code'] = stock_spot['ts_code'].astype(str).str.zfill(6)
-stock_spot = stock_spot[~stock_spot['name'].str.contains('ST|退|退市', na=False)]
+# 过滤 ST、退市、风险票
+stock_spot = stock_spot[~stock_spot['name'].str.contains('ST|退|退市|C|N', na=False)]
 
 print(f"共获取 {len(stock_spot)} 只股票")
 
@@ -51,44 +52,51 @@ filtered = stock_spot[
     (stock_spot['volume_ratio'] > 1.5)
 ].copy()
 
-# 简单打分
+# 多因子打分
 filtered['score_momentum'] = filtered['pct_chg'] * 5
 filtered['score_liquidity'] = (filtered['volume_ratio'] > 1.8).astype(int) * 30
-filtered['total_score'] = filtered['score_momentum'] + filtered['score_liquidity'] + (filtered['turnover_rate'] * 2)
+filtered['total_score'] = (
+    filtered['score_momentum']
+    + filtered['score_liquidity']
+    + filtered['turnover_rate'] * 2
+)
 
-filtered = filtered.sort_values('total_score', ascending=False).head(30)  # 先取30个候选
+# 取前30候选
+filtered = filtered.sort_values('total_score', ascending=False).head(30)
 
-# ==================== 对候选股补充历史数据（MA + 趋势） ====================
-print("正在补充历史数据...")
+# ==================== 补充历史数据（MA20/MA60 趋势） ====================
+print("正在补充历史趋势数据...")
 candidates = []
 for _, row in filtered.iterrows():
     try:
-        hist = ak.stock_zh_a_hist(symbol=row['ts_code'], period="daily", 
-                                  start_date=(beijing_now - timedelta(days=120)).strftime('%Y%m%d'))
-        if len(hist) < 20:
+        # 获取近120天日线
+        hist = ak.stock_zh_a_hist(
+            symbol=row['ts_code'],
+            period="daily",
+            start_date=(beijing_now - timedelta(days=120)).strftime('%Y%m%d')
+        )
+        if len(hist) < 60:
             continue
-            
+
         hist = hist.sort_values('日期')
-        ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
-        ma60 = hist['收盘'].rolling(60).mean().iloc[-1] if len(hist) >= 60 else ma20
         close = hist['收盘'].iloc[-1]
-        
-        score_trend = 40 if (close > ma20 and ma20 > ma60) else 0
-        
-        row['ma20'] = ma20
-        row['score_trend'] = score_trend
+        ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
+        ma60 = hist['收盘'].rolling(60).mean().iloc[-1]
+
+        # 均线多头额外加分
+        score_trend = 40 if (close > ma20 > ma60) else 0
         row['total_score'] += score_trend
         candidates.append(row)
-    except:
+    except Exception:
         continue
 
-if candidates:
-    df_final = pd.DataFrame(candidates).sort_values('total_score', ascending=False)
-    # 行业均衡（简化，按名称首字）
-    df_final = df_final.groupby(df_final['name'].str[0]).head(1)
-    top_candidates = df_final.head(4)
-else:
+if not candidates:
     top_candidates = pd.DataFrame()
+else:
+    df_final = pd.DataFrame(candidates).sort_values('total_score', ascending=False)
+    # 优化：避免同类型扎堆，每组只留1只，更均衡
+    df_final = df_final.groupby(df_final['name'].str[0]).head(1)
+    top_candidates = df_final.head(2)  # 固定推荐2只
 
 # ==================== 保存历史记录 ====================
 HISTORY_FILE = 'recommendation_history.csv'
@@ -103,6 +111,7 @@ if not top_candidates.empty:
             'close': round(row['close'], 2),
             'pct_chg': round(row['pct_chg'], 2)
         })
+
     file_exists = os.path.isfile(HISTORY_FILE)
     with open(HISTORY_FILE, 'a', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
@@ -112,18 +121,21 @@ if not top_candidates.empty:
 
 hist_count = len(pd.read_csv(HISTORY_FILE)) if os.path.isfile(HISTORY_FILE) else 0
 
-# ==================== 生成消息 ====================
+# ==================== 生成推送消息 ====================
 if top_candidates.empty:
     msg = f"## {trade_date} A股保守推荐 (AkShare版)\n\n**今日无符合条件的股票**，建议空仓观望。"
 else:
     table = "| 股票 | 涨幅 | 得分 | 买入参考 | 止盈 | 止损 |\n|------|------|------|----------|------|------|\n"
     for _, row in top_candidates.iterrows():
         close = round(row['close'], 2)
-        table += f"| {row['name']} | {round(row['pct_chg'],2)}% | {round(row['total_score'],1)} | {round(close*0.99,2)} | {round(close*1.06,2)} | {round(close*0.95,2)} |\n"
+        table += (
+            f"| {row['name']} | {round(row['pct_chg'],2)}% | {round(row['total_score'],1)} "
+            f"| {round(close*0.99,2)} | {round(close*1.06,2)} | {round(close*0.95,2)} |\n"
+        )
 
     msg = f"""## {trade_date} A股保守推荐 (AkShare v3.0)
 
-**推荐前2只**（保守筛选 + 多因子）：
+**推荐前2只**（保守筛选 + 多因子）
 
 {table}
 
@@ -137,35 +149,21 @@ else:
 **免责声明**：仅供学习参考，非投资建议。股市有风险！
 """
 
-# ==================== 推送 ====================
+# ==================== PushPlus 推送（唯一一段，无重复） ====================
 if PUSHPLUS_TOKEN:
-    push_url = "http://www.pushplus.plus/send"
-    data = {
-        "token": PUSHPLUS_TOKEN,
-        "title": f"A股保守推荐 AkShare - {trade_date}",
-        "content": msg,
-        "template": "markdown"
-    }
-    requests.post(push_url, data=data, timeout=15)
-    print("✅ 推送完成")
+    try:
+        push_url = "http://www.pushplus.plus/send"
+        data = {
+            "token": PUSHPLUS_TOKEN,
+            "title": f"A股保守推荐 - {trade_date}",
+            "content": msg,
+            "template": "markdown"
+        }
+        requests.post(push_url, data=data, timeout=15)
+        print("✅ PushPlus 推送完成")
+    except Exception as e:
+        print("❌ 推送失败:", e)
 else:
-    print(msg)
+    print("\n" + msg)
 
-print("🎉 AkShare版脚本运行完成")
-"""
-
-# ==================== PushPlus 推送 ====================
-if PUSHPLUS_TOKEN:
-    push_url = "http://www.pushplus.plus/send"
-    data = {
-        "token": PUSHPLUS_TOKEN,
-        "title": f"A股保守推荐 v2 - {trade_date}",
-        "content": msg,
-        "template": "markdown"
-    }
-    requests.post(push_url, data=data, timeout=15)
-    print("✅ 推送成功")
-else:
-    print(msg)
-
-print("🎉 v2.0 脚本运行完成")
+print("\n🎉 脚本运行完成")
