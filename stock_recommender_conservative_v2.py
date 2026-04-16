@@ -1,4 +1,4 @@
-import tushare as ts
+import akshare as ak
 import pandas as pd
 import requests
 import os
@@ -8,117 +8,91 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==================== 配置 ====================
-TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN')
 PUSHPLUS_TOKEN = os.getenv('PUSHPLUS_TOKEN')
 
-if not TUSHARE_TOKEN:
-    raise ValueError("❌ 请在 GitHub Secrets 设置 TUSHARE_TOKEN")
-
-pro = ts.pro_api(TUSHARE_TOKEN)
-
-# ==================== 最新交易日 ====================
+# ==================== 获取最新交易日 ====================
 beijing_now = datetime.utcnow() + timedelta(hours=8)
-today_str = beijing_now.strftime('%Y%m%d')
+trade_date = beijing_now.strftime('%Y%m%d')
+print(f"✅ 处理日期: {trade_date}")
 
-cal = pro.trade_cal(exchange='SSE', start_date=(beijing_now - timedelta(days=90)).strftime('%Y%m%d'), 
-                    end_date=today_str)
-trading_dates = cal[cal['is_open'] == 1]['cal_date'].sort_values(ascending=False).tolist()
-trade_date = trading_dates[0]
-
-print(f"✅ 处理交易日: {trade_date}")
-
-# ==================== 数据获取 ====================
-daily = pro.daily(trade_date=trade_date)
-basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-daily_basic = pro.daily_basic(trade_date=trade_date, fields='ts_code,turnover_rate,volume_ratio,pe,pb,circ_mv')
-
-# 历史数据（MA、RSI、5日涨幅）
-hist = pro.daily(ts_code='', start_date=(beijing_now - timedelta(days=180)).strftime('%Y%m%d'), 
-                 end_date=trade_date, fields='ts_code,trade_date,close')
-
-# 大盘（上证）
-index_daily = pro.index_daily(ts_code='000001.SH', start_date=(beijing_now - timedelta(days=5)).strftime('%Y%m%d'), 
-                              end_date=trade_date)
-market_chg = round(index_daily['pct_chg'].iloc[0], 2) if not index_daily.empty else 0.0
-
-# ROE（最新季度，简化处理）
+# ==================== 获取全市场当日行情（AkShare） ====================
+print("正在获取全市场行情...")
 try:
-    latest_period = trade_date[:6]  # 如 202504
-    roe_data = pro.fina_indicator(ts_code='', period=latest_period, fields='ts_code,roe')
-except:
-    roe_data = pd.DataFrame(columns=['ts_code', 'roe'])
+    stock_spot = ak.stock_zh_a_spot_em()
+except Exception as e:
+    print("获取行情失败:", e)
+    stock_spot = pd.DataFrame()
 
-# ==================== 计算技术指标 ====================
-hist = hist.sort_values(['ts_code', 'trade_date'])
+if stock_spot.empty:
+    print("行情数据为空")
+    exit(1)
 
-# MA20 / MA60
-ma20 = hist.groupby('ts_code')['close'].rolling(20).mean().reset_index(name='ma20')
-ma20 = ma20.groupby('ts_code').tail(1)[['ts_code', 'ma20']]
-ma60 = hist.groupby('ts_code')['close'].rolling(60).mean().reset_index(name='ma60')
-ma60 = ma60.groupby('ts_code').tail(1)[['ts_code', 'ma60']]
+# 重命名列方便使用
+stock_spot = stock_spot.rename(columns={
+    '代码': 'ts_code',
+    '名称': 'name',
+    '最新价': 'close',
+    '涨跌幅': 'pct_chg',
+    '成交量': 'volume',
+    '成交额': 'amount',
+    '换手率': 'turnover_rate',
+    '量比': 'volume_ratio'
+})
 
-# RSI
-def calc_rsi(group, period=14):
-    delta = group['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+stock_spot['ts_code'] = stock_spot['ts_code'].astype(str).str.zfill(6)
+stock_spot = stock_spot[~stock_spot['name'].str.contains('ST|退|退市', na=False)]
 
-rsi_series = hist.groupby('ts_code').apply(calc_rsi).reset_index(name='rsi')
-rsi_series = rsi_series.groupby('ts_code').tail(1)[['ts_code', 'rsi']]
+print(f"共获取 {len(stock_spot)} 只股票")
 
-# 5日涨幅
-last5 = hist[hist['trade_date'] >= (pd.to_datetime(trade_date) - timedelta(days=7)).strftime('%Y%m%d')]
-pct5 = last5.groupby('ts_code').apply(
-    lambda x: (x['close'].iloc[-1] / x['close'].iloc[0] - 1) * 100 if len(x) > 1 else 0
-).reset_index(name='pct_5d')
-
-# 合并所有数据
-df = daily.merge(basic, on='ts_code') \
-          .merge(daily_basic, on='ts_code') \
-          .merge(ma20, on='ts_code', how='left') \
-          .merge(ma60, on='ts_code', how='left') \
-          .merge(rsi_series, on='ts_code', how='left') \
-          .merge(pct5, on='ts_code', how='left')
-
-if not roe_data.empty:
-    df = df.merge(roe_data, on='ts_code', how='left')
-
-df = df[~df['name'].str.contains('ST|退|退市', na=False)]
-
-# ==================== 多因子打分 ====================
-df['score_value'] = ((40 / df['pe'].clip(upper=40)) * 25).clip(0, 25)
-df['score_momentum'] = ((df['pct_chg'] + df['pct_5d']) / 2).clip(0, 10) * 4
-df['score_trend'] = ((df['close'] > df['ma20']) & (df['ma20'] > df['ma60'])).astype(int) * 30
-df['score_liquidity'] = (df['volume_ratio'] > 1.8).astype(int) * 15
-df['score_risk'] = (df['rsi'] < 70).astype(int) * 10
-df['total_score'] = df[['score_value', 'score_momentum', 'score_trend', 'score_liquidity', 'score_risk']].sum(axis=1)
-
-# ==================== 保守筛选 + 行业均衡 ====================
-filtered = df[
-    (df['total_score'] > 65) &
-    (df['pct_chg'] >= 1.5) & (df['pct_chg'] <= 6.5) &
-    (df['amount'] > 80000000) &
-    (df['pe'] > 0) & (df['pe'] < 40) &
-    (df['pb'] < 3.5) &
-    (df.get('roe', 0) > 5) &          # ROE > 5%
-    (df['circ_mv'] > 500000)
+# ==================== 初步筛选 + 多因子打分 ====================
+filtered = stock_spot[
+    (stock_spot['pct_chg'] >= 1.5) & (stock_spot['pct_chg'] <= 6.5) &
+    (stock_spot['amount'] > 80000000) &
+    (stock_spot['volume_ratio'] > 1.5)
 ].copy()
 
-if not filtered.empty:
-    filtered = filtered.sort_values('total_score', ascending=False)
-    filtered = filtered.groupby('industry').head(1)  # 每个行业最多1只
+# 简单打分
+filtered['score_momentum'] = filtered['pct_chg'] * 5
+filtered['score_liquidity'] = (filtered['volume_ratio'] > 1.8).astype(int) * 30
+filtered['total_score'] = filtered['score_momentum'] + filtered['score_liquidity'] + (filtered['turnover_rate'] * 2)
 
-top_candidates = filtered.head(4)
+filtered = filtered.sort_values('total_score', ascending=False).head(30)  # 先取30个候选
 
-# ==================== 保存历史推荐到 CSV ====================
+# ==================== 对候选股补充历史数据（MA + 趋势） ====================
+print("正在补充历史数据...")
+candidates = []
+for _, row in filtered.iterrows():
+    try:
+        hist = ak.stock_zh_a_hist(symbol=row['ts_code'], period="daily", 
+                                  start_date=(beijing_now - timedelta(days=120)).strftime('%Y%m%d'))
+        if len(hist) < 20:
+            continue
+            
+        hist = hist.sort_values('日期')
+        ma20 = hist['收盘'].rolling(20).mean().iloc[-1]
+        ma60 = hist['收盘'].rolling(60).mean().iloc[-1] if len(hist) >= 60 else ma20
+        close = hist['收盘'].iloc[-1]
+        
+        score_trend = 40 if (close > ma20 and ma20 > ma60) else 0
+        
+        row['ma20'] = ma20
+        row['score_trend'] = score_trend
+        row['total_score'] += score_trend
+        candidates.append(row)
+    except:
+        continue
+
+if candidates:
+    df_final = pd.DataFrame(candidates).sort_values('total_score', ascending=False)
+    # 行业均衡（简化，按名称首字）
+    df_final = df_final.groupby(df_final['name'].str[0]).head(1)
+    top_candidates = df_final.head(4)
+else:
+    top_candidates = pd.DataFrame()
+
+# ==================== 保存历史记录 ====================
 HISTORY_FILE = 'recommendation_history.csv'
-def save_history():
-    if top_candidates.empty:
-        return
+if not top_candidates.empty:
     rows = []
     for _, row in top_candidates.iterrows():
         rows.append({
@@ -136,33 +110,48 @@ def save_history():
             writer.writeheader()
         writer.writerows(rows)
 
-save_history()
 hist_count = len(pd.read_csv(HISTORY_FILE)) if os.path.isfile(HISTORY_FILE) else 0
 
-# ==================== 生成推送消息 ====================
+# ==================== 生成消息 ====================
 if top_candidates.empty:
-    msg = f"## {trade_date} A股保守推荐\n\n**今日无符合严格条件的股票**。\n大盘涨幅：{market_chg}%\n建议**空仓观望**。"
+    msg = f"## {trade_date} A股保守推荐 (AkShare版)\n\n**今日无符合条件的股票**，建议空仓观望。"
 else:
-    table = "| 股票 | 涨幅 | 总分 | 买入参考 | 止盈 | 止损 |\n|------|------|------|----------|------|------|\n"
+    table = "| 股票 | 涨幅 | 得分 | 买入参考 | 止盈 | 止损 |\n|------|------|------|----------|------|------|\n"
     for _, row in top_candidates.iterrows():
         close = round(row['close'], 2)
-        table += f"| {row['name']} | {round(row['pct_chg'],2)}% | {row['total_score']:.1f} | {round(close*0.99,2)} | {round(close*1.06,2)} | {round(close*0.95,2)} |\n"
+        table += f"| {row['name']} | {round(row['pct_chg'],2)}% | {round(row['total_score'],1)} | {round(close*0.99,2)} | {round(close*1.06,2)} | {round(close*0.95,2)} |\n"
 
-    msg = f"""## {trade_date} A股保守多因子推荐 v2.0
+    msg = f"""## {trade_date} A股保守推荐 (AkShare v3.0)
 
-**大盘**：上证 {market_chg}%
-**历史记录**：已累计推荐 {hist_count} 只股票（详见仓库 CSV 文件）
-
-**推荐前2只**（行业均衡）：
+**推荐前2只**（保守筛选 + 多因子）：
 
 {table}
 
-**买入参考**：明日回调时分批，单仓 ≤ **5%**  
-**止盈**：+6% 逐步卖出  
-**止损**：-5% **必须执行**
+**风控提醒**：
+- 买入：明日回调时分批，单仓 ≤ 5%
+- 止盈：+6%
+- 止损：-5%（必须执行！）
 
-**筛选逻辑**：多因子打分 + 低估值 + ROE>5% + 趋势向上 + RSI<70  
-**免责声明**：仅供学习参考，非投资建议。股市有风险，入市需谨慎。
+**历史记录**：已累计推荐 {hist_count} 只
+**数据来源**：AkShare（免费）
+**免责声明**：仅供学习参考，非投资建议。股市有风险！
+"""
+
+# ==================== 推送 ====================
+if PUSHPLUS_TOKEN:
+    push_url = "http://www.pushplus.plus/send"
+    data = {
+        "token": PUSHPLUS_TOKEN,
+        "title": f"A股保守推荐 AkShare - {trade_date}",
+        "content": msg,
+        "template": "markdown"
+    }
+    requests.post(push_url, data=data, timeout=15)
+    print("✅ 推送完成")
+else:
+    print(msg)
+
+print("🎉 AkShare版脚本运行完成")
 """
 
 # ==================== PushPlus 推送 ====================
