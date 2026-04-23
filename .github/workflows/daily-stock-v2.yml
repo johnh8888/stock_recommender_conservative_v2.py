@@ -2,6 +2,7 @@ name: A股每日选股推荐（平衡型回测版）
 
 on:
   schedule:
+    # 每天北京时间 10:30 执行，对应 UTC 2:30
     - cron: '30 2 * * *'
   workflow_dispatch:
 
@@ -26,7 +27,7 @@ jobs:
         run: echo "PUSHPLUS_TOKEN=${{ secrets.PUSHPLUS_TOKEN }}" >> $GITHUB_ENV
 
       - name: 运行选股脚本
-        run: python stock_recommend.py   # 请替换为实际文件名
+        run: python stock_recommender_conservative_v2.py
 
       - name: 上传推荐历史记录（可选）
         uses: actions/upload-artifact@v4
