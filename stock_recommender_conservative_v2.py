@@ -12,7 +12,10 @@ warnings.filterwarnings("ignore")
 
 # ==================== 配置参数 ====================
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN")
-TEST_MODE = os.getenv("TEST_MODE", "0") == "1"
+
+# 测试模式：默认开启（本地运行可直接出结果），正式环境可通过环境变量 TEST_MODE=0 关闭
+TEST_MODE = os.getenv("TEST_MODE", "1") == "1"   # 默认为 True，即忽略时间限制
+
 TOTAL_CAPITAL = 20000
 TRADE_RATIO = 0.6
 FIX_AMOUNT = int(TOTAL_CAPITAL * TRADE_RATIO)
@@ -24,7 +27,7 @@ TRADE_HOUR = 10
 # 风控参数
 LOW_BUY_RATIO = 0.999
 HARD_STOP = 0.988
-MAX_ACCEPTABLE_MARKET_DROP = -0.4   # 原 -0.3，微量放宽大盘容忍度
+MAX_ACCEPTABLE_MARKET_DROP = -0.4   # 微量放宽大盘容忍度
 
 # 手续费与净利润目标（A股普通估算）
 BUY_FEE_RATE = 0.0003
@@ -43,14 +46,14 @@ MIN_AMOUNT = 2.0e8
 MIN_LB = 1.2
 MAX_LB = 2.0
 MIN_TURNOVER = 2.5
-MAX_TURNOVER = 9.0                # 原 8.5
+MAX_TURNOVER = 9.0
 MIN_AMPLITUDE = 1.8
-MAX_AMPLITUDE = 6.5               # 原 6.0
-MAX_OPEN_PCT = 2.0                # 原 1.8
-MIN_SCORE_THRESHOLD = 8.0         # 原 8.5
+MAX_AMPLITUDE = 6.5
+MAX_OPEN_PCT = 2.0
+MIN_SCORE_THRESHOLD = 8.0
 TOP_N_CANDIDATES = 5
 BACKTEST_LOOKBACK_DAYS = 150
-BACKTEST_MIN_SIGNALS = 4          # 原 5
+BACKTEST_MIN_SIGNALS = 4
 
 now = datetime.utcnow() + timedelta(hours=8)
 today = now.strftime("%Y%m%d")
@@ -161,7 +164,6 @@ def evaluate_stock_history(symbol: str) -> dict:
     for i in range(1, len(hist) - 1):
         row = hist.iloc[i]
         next_row = hist.iloc[i + 1]
-        # 注意：筛选条件使用微量放宽后的参数
         if not (
             MIN_PCT <= safe_float(row["pct"]) <= MAX_PCT and
             safe_float(row["amount"]) >= MIN_AMOUNT and
@@ -172,7 +174,6 @@ def evaluate_stock_history(symbol: str) -> dict:
         ):
             continue
 
-        # 使用当日开盘价作为模拟买入价
         buy_price = safe_float(row["open"])
         next_high = safe_float(next_row["high"])
         next_close = safe_float(next_row["close"])
@@ -232,10 +233,13 @@ def evaluate_stock_history(symbol: str) -> dict:
 
 
 # ==================== 执行控制 ====================
+# 测试模式默认开启，正式环境请设置环境变量 TEST_MODE=0
 if not TEST_MODE:
     if week_num not in TRADE_WEEKDAYS or current_hour != TRADE_HOUR:
         print("当前非周一到周四 10:00，脚本未执行")
         sys.exit(0)
+
+print("=== 开始运行选股脚本（测试模式已开启） ===" if TEST_MODE else "=== 正式模式运行中 ===")
 
 raw_df = ak.stock_zh_a_spot_em()
 try:
