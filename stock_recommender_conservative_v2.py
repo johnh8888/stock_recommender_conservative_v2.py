@@ -51,7 +51,6 @@ MIN_SCORE_THRESHOLD = 8.5
 TOP_N_CANDIDATES = 5
 BACKTEST_LOOKBACK_DAYS = 150
 BACKTEST_MIN_SIGNALS = 5
-TEST_MODE = os.getenv("TEST_MODE", "0") == "1"
 
 now = datetime.utcnow() + timedelta(hours=8)
 today = now.strftime("%Y%m%d")
@@ -90,10 +89,25 @@ def calc_open_pct(row: pd.Series) -> float:
 
 
 def get_next_trade_day_text(base_dt: datetime) -> str:
-    candidate = base_dt + timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate += timedelta(days=1)
-    return candidate.strftime("%Y%m%d")
+    try:
+        end_date = (base_dt + timedelta(days=60)).strftime("%Y%m%d")
+        start_date = base_dt.strftime("%Y%m%d")
+        trade_cal = ak.tool_trade_date_hist_sina()
+        if trade_cal is not None and not trade_cal.empty:
+            trade_dates = sorted(trade_cal["trade_date"].astype(str).tolist())
+            base_str = base_dt.strftime("%Y-%m-%d")
+            for d in trade_dates:
+                if d > base_str:
+                    return d.replace("-", "")
+        candidate = base_dt + timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate.strftime("%Y%m%d")
+    except Exception:
+        candidate = base_dt + timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate.strftime("%Y%m%d")
 
 
 def market_is_weak(market_pct: float) -> bool:
@@ -122,12 +136,23 @@ def evaluate_stock_history(symbol: str) -> dict:
     try:
         hist = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
     except Exception:
-        return {"signals": 0, "win_rate": 0.0, "target_250_hit_rate": 0.0, "target_350_hit_rate": 0.0, "avg_next_close": 0.0, "avg_next_high": 0.0, "avg_worst_drawdown": 0.0, "history_score": -999}
+        return {
+            "signals": 0, "win_rate": 0.0, "target_250_hit_rate": 0.0,
+            "target_350_hit_rate": 0.0, "avg_next_close": 0.0,
+            "avg_next_high": 0.0, "avg_worst_drawdown": 0.0, "history_score": -999
+        }
 
     if hist is None or hist.empty:
-        return {"signals": 0, "win_rate": 0.0, "target_250_hit_rate": 0.0, "target_350_hit_rate": 0.0, "avg_next_close": 0.0, "avg_next_high": 0.0, "avg_worst_drawdown": 0.0, "history_score": -999}
+        return {
+            "signals": 0, "win_rate": 0.0, "target_250_hit_rate": 0.0,
+            "target_350_hit_rate": 0.0, "avg_next_close": 0.0,
+            "avg_next_high": 0.0, "avg_worst_drawdown": 0.0, "history_score": -999
+        }
 
-    hist = hist.rename(columns={"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "涨跌幅": "pct", "成交额": "amount", "换手率": "turnover", "振幅": "amplitude"}).copy()
+    hist = hist.rename(columns={
+        "日期": "date", "开盘": "open", "收盘": "close", "最高": "high",
+        "最低": "low", "涨跌幅": "pct", "成交额": "amount", "换手率": "turnover", "振幅": "amplitude"
+    }).copy()
     hist = hist.sort_values("date").tail(BACKTEST_LOOKBACK_DAYS).reset_index(drop=True)
     hist["open_pct"] = (hist["open"] / hist["close"].shift(1) - 1) * 100
 
@@ -145,28 +170,32 @@ def evaluate_stock_history(symbol: str) -> dict:
         ):
             continue
 
-        signal_close = safe_float(row["close"])
+        buy_price = safe_float(row["open"])
         next_high = safe_float(next_row["high"])
         next_close = safe_float(next_row["close"])
         next_low = safe_float(next_row["low"])
-        if min(signal_close, next_high, next_close, next_low) <= 0:
+        if min(buy_price, next_high, next_close, next_low) <= 0:
             continue
 
-        buy_ref = signal_close * LOW_BUY_RATIO
+        buy_ref = buy_price * LOW_BUY_RATIO
         target_250_sell = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MIN)
         target_350_sell = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MAX)
 
         signals.append({
-            "win": 1 if next_close > signal_close else 0,
+            "win": 1 if next_close > buy_price else 0,
             "target_250_hit": 1 if next_high >= target_250_sell else 0,
             "target_350_hit": 1 if next_high >= target_350_sell else 0,
-            "next_close_ret": (next_close / signal_close - 1) * 100,
-            "next_high_ret": (next_high / signal_close - 1) * 100,
-            "next_low_ret": (next_low / signal_close - 1) * 100,
+            "next_close_ret": (next_close / buy_price - 1) * 100,
+            "next_high_ret": (next_high / buy_price - 1) * 100,
+            "next_low_ret": (next_low / buy_price - 1) * 100,
         })
 
     if not signals:
-        return {"signals": 0, "win_rate": 0.0, "target_250_hit_rate": 0.0, "target_350_hit_rate": 0.0, "avg_next_close": 0.0, "avg_next_high": 0.0, "avg_worst_drawdown": 0.0, "history_score": -999}
+        return {
+            "signals": 0, "win_rate": 0.0, "target_250_hit_rate": 0.0,
+            "target_350_hit_rate": 0.0, "avg_next_close": 0.0,
+            "avg_next_high": 0.0, "avg_worst_drawdown": 0.0, "history_score": -999
+        }
 
     s = pd.DataFrame(signals)
     signal_count = int(len(s))
@@ -216,7 +245,11 @@ if market_is_weak(market_pct):
     print("市场偏弱，今日空仓")
     sys.exit(0)
 
-df = raw_df.rename(columns={"代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct", "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude", "今开": "open", "昨收": "prev_close"}).copy()
+df = raw_df.rename(columns={
+    "代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct",
+    "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude",
+    "今开": "open", "昨收": "prev_close"
+}).copy()
 df["open_pct"] = raw_df.apply(calc_open_pct, axis=1)
 df["turnover"] = get_col(df, "turnover", np.nan)
 df["amplitude"] = get_col(df, "amplitude", np.nan)
@@ -265,7 +298,6 @@ if candidates.empty:
     print("历史样本不足，空仓")
     sys.exit(0)
 
-# 更偏向“到手净利命中率”
 candidates["final_score"] = candidates["realtime_score"] * 0.28 + candidates["history_score"] * 0.72
 candidates = candidates[candidates["final_score"] >= MIN_SCORE_THRESHOLD].sort_values("final_score", ascending=False).reset_index(drop=True)
 
