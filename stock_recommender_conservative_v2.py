@@ -24,7 +24,7 @@ TRADE_HOUR = 10
 # 风控参数
 LOW_BUY_RATIO = 0.999
 HARD_STOP = 0.988
-MAX_ACCEPTABLE_MARKET_DROP = -0.3
+MAX_ACCEPTABLE_MARKET_DROP = -0.4   # 原 -0.3，微量放宽大盘容忍度
 
 # 手续费与净利润目标（A股普通估算）
 BUY_FEE_RATE = 0.0003
@@ -34,7 +34,7 @@ ROUND_TRIP_FEE_RATE = BUY_FEE_RATE + SELL_FEE_RATE + SELL_TAX_RATE
 NET_PROFIT_TARGET_MIN = 250
 NET_PROFIT_TARGET_MAX = 350
 
-# 提高命中率：更严格筛选
+# 筛选条件（微量放宽版）
 MIN_PRICE = 8
 MAX_PRICE = 30
 MIN_PCT = 1.2
@@ -43,14 +43,14 @@ MIN_AMOUNT = 2.0e8
 MIN_LB = 1.2
 MAX_LB = 2.0
 MIN_TURNOVER = 2.5
-MAX_TURNOVER = 8.5
+MAX_TURNOVER = 9.0                # 原 8.5
 MIN_AMPLITUDE = 1.8
-MAX_AMPLITUDE = 6.0
-MAX_OPEN_PCT = 1.8
-MIN_SCORE_THRESHOLD = 8.5
+MAX_AMPLITUDE = 6.5               # 原 6.0
+MAX_OPEN_PCT = 2.0                # 原 1.8
+MIN_SCORE_THRESHOLD = 8.0         # 原 8.5
 TOP_N_CANDIDATES = 5
 BACKTEST_LOOKBACK_DAYS = 150
-BACKTEST_MIN_SIGNALS = 5
+BACKTEST_MIN_SIGNALS = 4          # 原 5
 
 now = datetime.utcnow() + timedelta(hours=8)
 today = now.strftime("%Y%m%d")
@@ -89,9 +89,8 @@ def calc_open_pct(row: pd.Series) -> float:
 
 
 def get_next_trade_day_text(base_dt: datetime) -> str:
+    """基于真实交易日历计算下一交易日"""
     try:
-        end_date = (base_dt + timedelta(days=60)).strftime("%Y%m%d")
-        start_date = base_dt.strftime("%Y%m%d")
         trade_cal = ak.tool_trade_date_hist_sina()
         if trade_cal is not None and not trade_cal.empty:
             trade_dates = sorted(trade_cal["trade_date"].astype(str).tolist())
@@ -99,6 +98,7 @@ def get_next_trade_day_text(base_dt: datetime) -> str:
             for d in trade_dates:
                 if d > base_str:
                     return d.replace("-", "")
+        # 降级方案：简单跳过周末
         candidate = base_dt + timedelta(days=1)
         while candidate.weekday() >= 5:
             candidate += timedelta(days=1)
@@ -131,6 +131,7 @@ def calc_target_sell_price(buy_price: float, capital: float, net_profit_target: 
 
 
 def evaluate_stock_history(symbol: str) -> dict:
+    """回测买入价使用当日开盘价（更贴近10:00实际执行）"""
     start_date = (now - timedelta(days=BACKTEST_LOOKBACK_DAYS + 40)).strftime("%Y%m%d")
     end_date = today
     try:
@@ -160,6 +161,7 @@ def evaluate_stock_history(symbol: str) -> dict:
     for i in range(1, len(hist) - 1):
         row = hist.iloc[i]
         next_row = hist.iloc[i + 1]
+        # 注意：筛选条件使用微量放宽后的参数
         if not (
             MIN_PCT <= safe_float(row["pct"]) <= MAX_PCT and
             safe_float(row["amount"]) >= MIN_AMOUNT and
@@ -170,6 +172,7 @@ def evaluate_stock_history(symbol: str) -> dict:
         ):
             continue
 
+        # 使用当日开盘价作为模拟买入价
         buy_price = safe_float(row["open"])
         next_high = safe_float(next_row["high"])
         next_close = safe_float(next_row["close"])
