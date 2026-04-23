@@ -1,4 +1,4 @@
-name: A股每日选股推荐（平衡型回测版）
+name: A股稳赚推荐
 
 on:
   schedule:
