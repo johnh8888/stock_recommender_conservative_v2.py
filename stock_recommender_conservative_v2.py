@@ -12,14 +12,12 @@ warnings.filterwarnings("ignore")
 
 # ==================== 配置参数 ====================
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN")
+TEST_MODE = os.getenv("TEST_MODE", "0") == "1"
 TOTAL_CAPITAL = 20000
 TRADE_RATIO = 0.6
 FIX_AMOUNT = int(TOTAL_CAPITAL * TRADE_RATIO)
 
-# 测试模式：True 时忽略 10:00 限制，直接输出回测统计
-TEST_MODE = os.getenv("TEST_MODE", "0") == "1"
-
-# 交易规则：仅周一到周四 10:00 执行
+# 交易规则：仅周一到周四 10:00 执行；测试模式可忽略时间限制
 TRADE_WEEKDAYS = {0, 1, 2, 3}
 TRADE_HOUR = 10
 
@@ -53,6 +51,7 @@ MIN_SCORE_THRESHOLD = 8.5
 TOP_N_CANDIDATES = 5
 BACKTEST_LOOKBACK_DAYS = 150
 BACKTEST_MIN_SIGNALS = 5
+TEST_MODE = os.getenv("TEST_MODE", "0") == "1"
 
 now = datetime.utcnow() + timedelta(hours=8)
 today = now.strftime("%Y%m%d")
@@ -200,91 +199,103 @@ def evaluate_stock_history(symbol: str) -> dict:
     }
 
 
-def run_strategy() -> dict:
-    raw_df = ak.stock_zh_a_spot_em()
-    try:
-        sh_row = raw_df[raw_df["名称"] == "上证指数"]
-        market_pct = float(sh_row["涨跌幅"].iloc[0]) if not sh_row.empty else 0.0
-    except Exception:
-        market_pct = 0.0
+# ==================== 执行控制 ====================
+if not TEST_MODE:
+    if week_num not in TRADE_WEEKDAYS or current_hour != TRADE_HOUR:
+        print("当前非周一到周四 10:00，脚本未执行")
+        sys.exit(0)
 
-    if market_is_weak(market_pct):
-        return {"status": "empty", "reason": "market_weak", "market_pct": market_pct}
+raw_df = ak.stock_zh_a_spot_em()
+try:
+    sh_row = raw_df[raw_df["名称"] == "上证指数"]
+    market_pct = float(sh_row["涨跌幅"].iloc[0]) if not sh_row.empty else 0.0
+except Exception:
+    market_pct = 0.0
 
-    df = raw_df.rename(columns={"代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct", "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude", "今开": "open", "昨收": "prev_close"}).copy()
-    df["open_pct"] = raw_df.apply(calc_open_pct, axis=1)
-    df["turnover"] = get_col(df, "turnover", np.nan)
-    df["amplitude"] = get_col(df, "amplitude", np.nan)
-    df["open_pct"] = get_col(df, "open_pct", np.nan)
+if market_is_weak(market_pct):
+    print("市场偏弱，今日空仓")
+    sys.exit(0)
 
-    ban_pattern = r"(^ST|^\*ST|退市|^N\d|^C[^N]|XD|XR)"
-    df = df[~df["name"].str.contains(ban_pattern, na=False, regex=True)]
-    df = df[(df["code"].astype(str).str.startswith("60")) | (df["code"].astype(str).str.startswith("00"))]
+df = raw_df.rename(columns={"代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct", "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude", "今开": "open", "昨收": "prev_close"}).copy()
+df["open_pct"] = raw_df.apply(calc_open_pct, axis=1)
+df["turnover"] = get_col(df, "turnover", np.nan)
+df["amplitude"] = get_col(df, "amplitude", np.nan)
+df["open_pct"] = get_col(df, "open_pct", np.nan)
 
-    filtered = df[
-        (df["price"] >= MIN_PRICE) & (df["price"] <= MAX_PRICE) &
-        (df["pct"] >= MIN_PCT) & (df["pct"] <= MAX_PCT) &
-        (df["amount"] >= MIN_AMOUNT) &
-        (df["lb"] >= MIN_LB) & (df["lb"] <= MAX_LB) &
-        (df["turnover"] >= MIN_TURNOVER) & (df["turnover"] <= MAX_TURNOVER) &
-        (df["amplitude"] >= MIN_AMPLITUDE) & (df["amplitude"] <= MAX_AMPLITUDE) &
-        (df["open_pct"] <= MAX_OPEN_PCT)
-    ].copy()
+ban_pattern = r"(^ST|^\*ST|退市|^N\d|^C[^N]|XD|XR)"
+df = df[~df["name"].str.contains(ban_pattern, na=False, regex=True)]
+df = df[(df["code"].astype(str).str.startswith("60")) | (df["code"].astype(str).str.startswith("00"))]
 
-    if filtered.empty:
-        return {"status": "empty", "reason": "no_filtered", "market_pct": market_pct}
+filtered = df[
+    (df["price"] >= MIN_PRICE) & (df["price"] <= MAX_PRICE) &
+    (df["pct"] >= MIN_PCT) & (df["pct"] <= MAX_PCT) &
+    (df["amount"] >= MIN_AMOUNT) &
+    (df["lb"] >= MIN_LB) & (df["lb"] <= MAX_LB) &
+    (df["turnover"] >= MIN_TURNOVER) & (df["turnover"] <= MAX_TURNOVER) &
+    (df["amplitude"] >= MIN_AMPLITUDE) & (df["amplitude"] <= MAX_AMPLITUDE) &
+    (df["open_pct"] <= MAX_OPEN_PCT)
+].copy()
 
-    filtered["realtime_score"] = (
-        filtered["pct"] * 1.35 +
-        filtered["lb"] * 2.2 +
-        (filtered["amount"] / 1e8) * 0.8 +
-        filtered["turnover"] * 0.75 -
-        filtered["amplitude"] * 0.45 -
-        filtered["open_pct"].fillna(0) * 0.6
+if filtered.empty:
+    print("今日无高质量标的，空仓")
+    sys.exit(0)
+
+filtered["realtime_score"] = (
+    filtered["pct"] * 1.35 +
+    filtered["lb"] * 2.2 +
+    (filtered["amount"] / 1e8) * 0.8 +
+    filtered["turnover"] * 0.75 -
+    filtered["amplitude"] * 0.45 -
+    filtered["open_pct"].fillna(0) * 0.6
+)
+
+candidates = filtered.sort_values("realtime_score", ascending=False).head(TOP_N_CANDIDATES).copy()
+if candidates.empty:
+    print("今日无候选，空仓")
+    sys.exit(0)
+
+history_rows = [evaluate_stock_history(str(row["code"])) for _, row in candidates.iterrows()]
+if not history_rows:
+    print("历史样本不足，空仓")
+    sys.exit(0)
+
+candidates = pd.concat([candidates.reset_index(drop=True), pd.DataFrame(history_rows)], axis=1)
+candidates = candidates[candidates["signals"] >= BACKTEST_MIN_SIGNALS].copy()
+if candidates.empty:
+    print("历史样本不足，空仓")
+    sys.exit(0)
+
+# 更偏向“到手净利命中率”
+candidates["final_score"] = candidates["realtime_score"] * 0.28 + candidates["history_score"] * 0.72
+candidates = candidates[candidates["final_score"] >= MIN_SCORE_THRESHOLD].sort_values("final_score", ascending=False).reset_index(drop=True)
+
+if candidates.empty:
+    print("评分不足，空仓")
+    sys.exit(0)
+
+stock = candidates.iloc[0]
+p = safe_float(stock["price"])
+buy_ref = round(p * LOW_BUY_RATIO, 2)
+stop = round(p * HARD_STOP, 2)
+next_sell_day = get_next_trade_day_text(now)
+
+target_sell_min = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MIN)
+target_sell_max = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MAX)
+net_profit_min = round(calc_net_profit(target_sell_min, buy_ref, FIX_AMOUNT), 2)
+net_profit_max = round(calc_net_profit(target_sell_max, buy_ref, FIX_AMOUNT), 2)
+net_stop_loss = round(calc_net_profit(stop, buy_ref, FIX_AMOUNT), 2)
+
+best = candidates.head(3)[["code", "name", "pct", "signals", "win_rate", "target_250_hit_rate", "target_350_hit_rate", "final_score"]].copy()
+lines = []
+for _, row in best.iterrows():
+    lines.append(
+        f"- {row['name']}({row['code']})｜现涨 {safe_float(row['pct']):.2f}%｜"
+        f"胜率 {safe_float(row['win_rate']):.1f}%｜"
+        f"250命中 {safe_float(row['target_250_hit_rate']):.1f}%｜"
+        f"350命中 {safe_float(row['target_350_hit_rate']):.1f}%"
     )
 
-    candidates = filtered.sort_values("realtime_score", ascending=False).head(TOP_N_CANDIDATES).copy()
-    if candidates.empty:
-        return {"status": "empty", "reason": "no_candidates", "market_pct": market_pct}
-
-    history_rows = [evaluate_stock_history(str(row["code"])) for _, row in candidates.iterrows()]
-    if not history_rows:
-        return {"status": "empty", "reason": "no_history", "market_pct": market_pct}
-
-    candidates = pd.concat([candidates.reset_index(drop=True), pd.DataFrame(history_rows)], axis=1)
-    candidates = candidates[candidates["signals"] >= BACKTEST_MIN_SIGNALS].copy()
-    if candidates.empty:
-        return {"status": "empty", "reason": "sample_small", "market_pct": market_pct}
-
-    candidates["final_score"] = candidates["realtime_score"] * 0.28 + candidates["history_score"] * 0.72
-    candidates = candidates[candidates["final_score"] >= MIN_SCORE_THRESHOLD].sort_values("final_score", ascending=False).reset_index(drop=True)
-
-    if candidates.empty:
-        return {"status": "empty", "reason": "score_low", "market_pct": market_pct}
-
-    stock = candidates.iloc[0]
-    p = safe_float(stock["price"])
-    buy_ref = round(p * LOW_BUY_RATIO, 2)
-    stop = round(p * HARD_STOP, 2)
-    next_sell_day = get_next_trade_day_text(now)
-
-    target_sell_min = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MIN)
-    target_sell_max = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MAX)
-    net_profit_min = round(calc_net_profit(target_sell_min, buy_ref, FIX_AMOUNT), 2)
-    net_profit_max = round(calc_net_profit(target_sell_max, buy_ref, FIX_AMOUNT), 2)
-    net_stop_loss = round(calc_net_profit(stop, buy_ref, FIX_AMOUNT), 2)
-
-    best = candidates.head(3)[["code", "name", "pct", "signals", "win_rate", "target_250_hit_rate", "target_350_hit_rate", "final_score"]].copy()
-    lines = []
-    for _, row in best.iterrows():
-        lines.append(
-            f"- {row['name']}({row['code']})｜现涨 {safe_float(row['pct']):.2f}%｜"
-            f"胜率 {safe_float(row['win_rate']):.1f}%｜"
-            f"250命中 {safe_float(row['target_250_hit_rate']):.1f}%｜"
-            f"350命中 {safe_float(row['target_350_hit_rate']):.1f}%"
-        )
-
-    content = f"""
+content = f"""
 ## {today} 10:00 最强赚钱候选
 - 股票：{stock['name']}({stock['code']})
 - 现价：{p:.2f}
@@ -303,38 +314,5 @@ def run_strategy() -> dict:
 {os.linesep.join(lines)}
 """.strip()
 
-    push("10点最强候选", content)
-    return {
-        "status": "ok",
-        "market_pct": market_pct,
-        "stock": stock,
-        "content": content,
-        "candidates": candidates,
-    }
-
-
-if TEST_MODE:
-    result = run_strategy()
-    if result.get("status") == "ok":
-        stock = result["stock"]
-        print(f"测试模式结果：{stock['name']}({stock['code']})")
-        print(f"市场涨跌：{result['market_pct']:.2f}%")
-        print(f"次日收盘上涨胜率：{safe_float(stock['win_rate']):.1f}%")
-        print(f"到手250元命中率：{safe_float(stock['target_250_hit_rate']):.1f}%")
-        print(f"到手350元命中率：{safe_float(stock['target_350_hit_rate']):.1f}%")
-        print(f"历史样本：{int(stock['signals'])}")
-    else:
-        print(f"测试模式结果：{result.get('reason', 'empty')}，空仓")
-    sys.exit(0)
-
-if week_num not in TRADE_WEEKDAYS or current_hour != TRADE_HOUR:
-    print("当前非周一到周四 10:00，脚本未执行")
-    sys.exit(0)
-
-result = run_strategy()
-if result.get("status") != "ok":
-    print(f"今日空仓：{result.get('reason', 'empty')}")
-    sys.exit(0)
-
-stock = result["stock"]
+push("10点最强候选", content)
 print(f"今日推荐：{stock['name']}({stock['code']})")
