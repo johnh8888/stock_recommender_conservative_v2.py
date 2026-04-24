@@ -27,9 +27,9 @@ jobs:
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           TEST_MODE: 0
-        run: python stable_selector.py
+        run: python stock_recommender_conservative_v2.py
 
-      - name: 提交交易日志到仓库
+      - name: 提交交易日志
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
