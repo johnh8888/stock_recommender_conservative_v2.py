@@ -31,8 +31,12 @@ jobs:
 
       - name: 提交交易日志
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add trade_log.csv
-          git commit -m "更新交易日志 $(TZ='Asia/Shanghai' date +'%Y%m%d')" || echo "无变更"
-          git push
+          if [ -f trade_log.csv ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add trade_log.csv
+            git commit -m "更新交易日志 $(TZ='Asia/Shanghai' date +'%Y%m%d')" || echo "无变更"
+            git push
+          else
+            echo "暂无日志文件，跳过提交"
+          fi
