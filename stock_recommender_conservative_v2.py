@@ -20,14 +20,14 @@ TRADE_RATIO = 0.6
 FIX_AMOUNT = int(TOTAL_CAPITAL * TRADE_RATIO)
 
 # 交易时间规则（测试模式可忽略）
-MORNING_START, MORNING_END = 10, 10.67  # 10:00-10:40
+MORNING_START, MORNING_END = 10, 10.67   # 10:00-10:40
 AFTERNOON_START, AFTERNOON_END = 14.67, 14.92  # 14:40-14:55
 TRADE_WEEKDAYS = {0, 1, 2, 3}
 
 # 风控参数
-LOW_BUY_RATIO = 0.997   # 早盘动态低吸比例（原0.999 -> 0.997）
-HARD_STOP_RATIO = -0.02  # 成本价-2%止损（原0.988）
-MAX_ACCEPTABLE_MARKET_DROP = -0.35  # 大盘单日不超-0.35%
+LOW_BUY_RATIO = 0.997
+HARD_STOP_RATIO = -0.02
+MAX_ACCEPTABLE_MARKET_DROP = -0.35
 
 # 手续费
 BUY_FEE_RATE = 0.0003
@@ -37,7 +37,7 @@ ROUND_TRIP_FEE_RATE = BUY_FEE_RATE + SELL_FEE_RATE + SELL_TAX_RATE
 NET_PROFIT_TARGET_MIN = 250
 NET_PROFIT_TARGET_MAX = 350
 
-# 筛选条件（收紧防御侧，放大攻击侧的稳健范围）
+# 早盘筛选条件
 MIN_PRICE, MAX_PRICE = 8, 30
 MIN_PCT, MAX_PCT = 1.2, 5.5
 MIN_AMOUNT = 1.8e8
@@ -58,27 +58,28 @@ MIN_SCORE_THRESHOLD = 7.5
 TOP_N_CANDIDATES = 5
 BACKTEST_LOOKBACK_DAYS = 180
 BACKTEST_MIN_SIGNALS = 4
-MIN_CONSECUTIVE_UP = 3  # 要求至少连续小阳天数
+MIN_CONSECUTIVE_UP = 3
 
-# 大盘20日线过滤
+# 大盘过滤 & 基本面排雷
 MA20_FILTER = True
-
-# 基本面排雷
 FUNDAMENTAL_CHECK = True
 
 now = datetime.utcnow() + timedelta(hours=8)
 today = now.strftime("%Y%m%d")
 week_num = now.weekday()
-current_hour = now.hour + now.minute / 60.0  # 例如10:30 = 10.5
+current_hour = now.hour + now.minute / 60.0
 
 
 def push(title: str, content: str):
     if PUSHPLUS_TOKEN:
-        requests.post(
-            "http://www.pushplus.plus/send",
-            json={"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "markdown"},
-            timeout=10,
-        )
+        try:
+            requests.post(
+                "http://www.pushplus.plus/send",
+                json={"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "markdown"},
+                timeout=10,
+            )
+        except Exception:
+            pass
 
 
 def safe_float(value, default=0.0):
@@ -142,9 +143,8 @@ def calc_target_sell_price(buy_price: float, capital: float, net_profit_target: 
     return round(buy_price * target_ratio, 2)
 
 
-# ---------- 新增：大盘20日线安全判断 ----------
 def get_market_ma20_safe():
-    """返回(close, ma20, safe:bool) 安全=大盘在20日线上且均线向上"""
+    """返回大略安全判断(close, ma20, safe)"""
     try:
         index_df = ak.stock_zh_index_daily(symbol="sh000001")
         index_df = index_df.sort_values("date").tail(30)
@@ -154,12 +154,11 @@ def get_market_ma20_safe():
         safe = (close > ma20) and (ma20 > ma20_prev)
         return close, ma20, safe
     except Exception:
-        return 0, 0, True  # 接口失败不拦截
+        return 0, 0, True
 
 
-# ---------- 新增：行业板块强度 ----------
 def get_sector_rank_map():
-    """返回{板块名称: 涨跌幅} 的字典"""
+    """返回{板块名称: 涨跌幅}"""
     try:
         sector_df = ak.stock_board_industry_name_em()
         return dict(zip(sector_df["板块名称"], sector_df["涨跌幅"]))
@@ -167,9 +166,8 @@ def get_sector_rank_map():
         return {}
 
 
-# ---------- 新增：连续温和阳线检查 ----------
 def has_consecutive_mild_up(code: str, days_needed=MIN_CONSECUTIVE_UP):
-    """检查最近days_needed天是否每天小阳，且无大幅跳涨"""
+    """最近days_needed天连续小阳，且20日内无大跌"""
     try:
         end = (now - timedelta(days=1)).strftime("%Y%m%d")
         start = (now - timedelta(days=30)).strftime("%Y%m%d")
@@ -178,13 +176,11 @@ def has_consecutive_mild_up(code: str, days_needed=MIN_CONSECUTIVE_UP):
             return False
         recent = hist.tail(days_needed + 5)
         pct_col = get_col(recent, "涨跌幅")
-        # 检查最近days_needed天
         tail_pct = pct_col.tail(days_needed)
         if tail_pct.isna().any():
             return False
         if not tail_pct.between(0.5, 4.5).all():
             return False
-        # 额外：过去20天无-5%以下大跌
         check = pct_col.tail(20)
         if (check < -5).any():
             return False
@@ -193,23 +189,21 @@ def has_consecutive_mild_up(code: str, days_needed=MIN_CONSECUTIVE_UP):
         return False
 
 
-# ---------- 新增：基础财务排雷 ----------
 def has_safe_fundamentals(code: str):
-    """检查归属母公司净利润 > 0（最近一期），基于个股信息接口"""
+    """归属母公司净利润 > 0"""
     try:
         info = ak.stock_individual_info_em(symbol=code)
         if info is None or info.empty:
-            return True  # 拿不到数据就放过
+            return True
         info_dict = dict(zip(info["item"], info["value"]))
         net_profit = safe_float(info_dict.get("归属母公司股东的净利润", 0), 0)
         return net_profit > 0
     except Exception:
-        return True  # 接口错误不拦截
+        return True
 
 
-# ---------- 修改的历史回测（使用模拟低吸买入价） ----------
 def evaluate_stock_history(symbol: str) -> dict:
-    """回测买入价采用当日收盘价*低吸比率，更贴近实盘挂单效果"""
+    """回测买入价采用收盘价*低吸比率模拟实盘挂单"""
     start_date = (now - timedelta(days=BACKTEST_LOOKBACK_DAYS + 40)).strftime("%Y%m%d")
     end_date = today
     try:
@@ -245,7 +239,6 @@ def evaluate_stock_history(symbol: str) -> dict:
         ):
             continue
 
-        # 模拟实盘低吸：用当日收盘价乘以折扣作为买入价
         buy_price_sim = safe_float(row["close"]) * LOW_BUY_RATIO
         next_high = safe_float(next_row["high"])
         next_close = safe_float(next_row["close"])
@@ -273,8 +266,8 @@ def evaluate_stock_history(symbol: str) -> dict:
     s = pd.DataFrame(signals)
     signal_count = len(s)
     win_rate = float(s["win"].mean() * 100)
-    target_250 = float(s["target_250_hit"].mean() * 100)
-    target_350 = float(s["target_350_hit"].mean() * 100)
+    hit_250 = float(s["target_250_hit"].mean() * 100)
+    hit_350 = float(s["target_350_hit"].mean() * 100)
     avg_close = float(s["next_close_ret"].mean())
     avg_high = float(s["next_high_ret"].mean())
     avg_low = float(s["next_low_ret"].mean())
@@ -282,8 +275,8 @@ def evaluate_stock_history(symbol: str) -> dict:
     sample_penalty = min(signal_count, 15) / 15
     history_score = (
         win_rate * 0.22 +
-        target_250 * 0.38 +
-        target_350 * 0.22 +
+        hit_250 * 0.38 +
+        hit_350 * 0.22 +
         avg_close * 9.0 +
         avg_high * 4.5 +
         avg_low * 2.0
@@ -291,14 +284,13 @@ def evaluate_stock_history(symbol: str) -> dict:
 
     return {
         "signals": signal_count, "win_rate": win_rate,
-        "target_250_hit_rate": target_250, "target_350_hit_rate": target_350,
+        "target_250_hit_rate": hit_250, "target_350_hit_rate": hit_350,
         "avg_next_close": avg_close, "avg_next_high": avg_high,
         "avg_worst_drawdown": avg_low, "history_score": history_score
     }
 
 
 # ==================== 主流程 ====================
-# 测试模式忽略时间，正式环境严格按时段
 if not TEST_MODE:
     in_morning = (week_num in TRADE_WEEKDAYS) and (MORNING_START <= current_hour < MORNING_END)
     in_afternoon = (week_num in TRADE_WEEKDAYS) and (AFTERNOON_START <= current_hour < AFTERNOON_END)
@@ -306,20 +298,25 @@ if not TEST_MODE:
         print("非允许交易时段，退出")
         sys.exit(0)
 else:
-    in_morning = True   # 测试模式下优先模拟早盘
+    in_morning = True
     in_afternoon = False
 
-# 大盘风控
+# 大盘安全过滤
 if MA20_FILTER:
     _, _, ma_safe = get_market_ma20_safe()
     if not ma_safe and not TEST_MODE:
-        print("大盘不在20日线上方且均线未向上，暂停开仓")
+        print("大盘不在20日线上方或均线未向上，暂停开仓")
         sys.exit(0)
     if not ma_safe and TEST_MODE:
-        print("⚠️ 测试模式：大盘未满足安全，但仍继续运行")
+        print("⚠️ 测试模式：大盘未满足安全条件，但继续执行")
 
 # 获取全A实时行情
-raw_df = ak.stock_zh_a_spot_em()
+try:
+    raw_df = ak.stock_zh_a_spot_em()
+except Exception as e:
+    print(f"获取行情失败: {e}")
+    sys.exit(0)
+
 try:
     sh_row = raw_df[raw_df["名称"] == "上证指数"]
     market_pct = float(sh_row["涨跌幅"].iloc[0]) if not sh_row.empty else 0.0
@@ -327,10 +324,10 @@ except Exception:
     market_pct = 0.0
 
 if market_is_weak(market_pct):
-    print(f"市场跌幅{market_pct:.2f}%，超过警戒线，空仓")
+    print(f"市场跌幅{market_pct:.2f}%过深，空仓")
     sys.exit(0)
 
-# 数据预处理
+# 数据清洗
 df = raw_df.rename(columns={
     "代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct",
     "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude",
@@ -343,29 +340,26 @@ for col in ["turnover", "amplitude", "open_pct"]:
 # 排除ST/新股等
 ban_pattern = r"(^ST|^\*ST|退市|^N|^C[^N]|XD|XR)"
 df = df[~df["name"].str.contains(ban_pattern, na=False, regex=True)]
-df = df[(df["code"].astype(str).str.startswith(("60", "00")))]  # 主板
+df = df[(df["code"].astype(str).str.startswith(("60", "00")))]
 
-# 行业板块强度
+# 行业板块效应
 sector_map = get_sector_rank_map()
 if sector_map:
-    # 计算前40%阈值
     sector_pcts = sorted(sector_map.values(), reverse=True)
     cutoff_idx = int(len(sector_pcts) * 0.4)
     cutoff_pct = sector_pcts[cutoff_idx] if len(sector_pcts) > 0 else -100
-    df["sector"] = df["name"].map(lambda x: None)  # 临时代码，需要从a股列表中拿行业
-    # 实际上df中可能有“行业”列，这里改用akshare的stock_individual_info_em? 直接使用stock_zh_a_spot_em的“行业”列
-    if "行业" in raw_df.columns:
-        df["sector"] = raw_df["行业"]
-    elif "所属行业" in raw_df.columns:
-        df["sector"] = raw_df["所属行业"]
-    if "sector" in df.columns:
-        # 过滤掉无行业或行业排名靠后的
+    # 尝试匹配行业列
+    sector_col = None
+    for col_name in ["行业", "所属行业"]:
+        if col_name in raw_df.columns:
+            sector_col = col_name
+            break
+    if sector_col:
+        df["sector"] = raw_df[sector_col]
         df["sector_pct"] = df["sector"].map(sector_map)
         df = df[df["sector_pct"].notna() & (df["sector_pct"] >= cutoff_pct)]
-    else:
-        pass  # 无行业列则跳过此过滤
 
-# ========== 早盘筛选 ==========
+# 早盘筛选
 if in_morning:
     filtered = df[
         (df["price"] >= MIN_PRICE) & (df["price"] <= MAX_PRICE) &
@@ -376,15 +370,14 @@ if in_morning:
         (df["amplitude"] >= MIN_AMPLITUDE) & (df["amplitude"] <= MAX_AMPLITUDE) &
         (df["open_pct"] <= MAX_OPEN_PCT)
     ].copy()
-    # 连续阳线检查
     if MIN_CONSECUTIVE_UP > 0:
         filtered = filtered[filtered["code"].apply(has_consecutive_mild_up)]
     print(f"早盘初步筛选出 {len(filtered)} 只")
 else:
     filtered = pd.DataFrame()
 
-# ========== 尾盘筛选（若早盘无结果或时间在尾盘窗口） ==========
-if (filtered.empty and not in_morning) or (in_afternoon):
+# 尾盘补充
+if (filtered.empty and not in_morning) or in_afternoon:
     print("切换到尾盘防御模式...")
     filtered_eod = df[
         (df["price"] >= MIN_PRICE) & (df["price"] <= MAX_PRICE) &
@@ -394,17 +387,16 @@ if (filtered.empty and not in_morning) or (in_afternoon):
         (df["turnover"] <= EOD_MAX_TURNOVER) &
         (df["amplitude"] <= EOD_MAX_AMPLITUDE)
     ].copy()
-    # 尾盘也加连续阳线要求（略放宽）
     if MIN_CONSECUTIVE_UP > 0:
         filtered_eod = filtered_eod[filtered_eod["code"].apply(has_consecutive_mild_up)]
     filtered = filtered_eod
     print(f"尾盘初步筛选出 {len(filtered)} 只")
 
 if filtered.empty:
-    print("今日无高质量标的，空仓")
+    print("今日无标的，空仓")
     sys.exit(0)
 
-# -------- 实时评分 --------
+# 实时评分
 filtered["realtime_score"] = (
     filtered["pct"] * 1.3 +
     filtered["lb"] * 2.0 +
@@ -419,21 +411,22 @@ if candidates.empty:
     print("无候选")
     sys.exit(0)
 
-# 历史回测
+# 历史回测 + 基本面排雷
 history_rows = []
-for _, row in candidates.iterrows():
+valid_idx = []
+for idx, row in candidates.iterrows():
     code = str(row["code"])
     if FUNDAMENTAL_CHECK and not has_safe_fundamentals(code):
-        continue  # 基本面不通过，跳过
+        continue
     hist_res = evaluate_stock_history(code)
     history_rows.append(hist_res)
+    valid_idx.append(idx)
 
-if not history_rows:
+if not valid_idx:
     print("基本面或历史样本不足，空仓")
     sys.exit(0)
 
-# 重新对齐长度
-candidates = candidates.iloc[:len(history_rows)].reset_index(drop=True)
+candidates = candidates.loc[valid_idx].reset_index(drop=True)
 candidates = pd.concat([candidates, pd.DataFrame(history_rows)], axis=1)
 candidates = candidates[candidates["signals"] >= BACKTEST_MIN_SIGNALS].copy()
 if candidates.empty:
@@ -451,7 +444,7 @@ if candidates.empty:
 stock = candidates.iloc[0]
 p = safe_float(stock["price"])
 buy_ref = round(p * LOW_BUY_RATIO, 2)
-stop = round(buy_ref * (1 + HARD_STOP_RATIO), 2)  # 成本价-2%
+stop = round(buy_ref * (1 + HARD_STOP_RATIO), 2)
 next_sell_day = get_next_trade_day_text(now)
 
 target_sell_min = calc_target_sell_price(buy_ref, FIX_AMOUNT, NET_PROFIT_TARGET_MIN)
@@ -475,13 +468,13 @@ content = f"""
 ## {today} 低吸稳赢候选
 - 股票：{stock['name']}({stock['code']})
 - 现价：{p:.2f}
-- 计划低吸买入参考：{buy_ref} （现价打 {LOW_BUY_RATIO*100:.1f}%折扣）
-- 止盈区间（净利{NET_PROFIT_TARGET_MIN}~{NET_PROFIT_TARGET_MAX}元）：{target_sell_min} ~ {target_sell_max}
-- 硬止损价格：{stop} （成本价-2%）
-- 卖出时间窗口：{next_sell_day} 起
-- 预计净利：{net_profit_min} ~ {net_profit_max}
-- 止损预计亏损：{net_stop_loss}
-- 历史样本数：{int(stock['signals'])}
+- 计划低吸买入参考：{buy_ref} （折扣{LOW_BUY_RATIO*100:.1f}%）
+- 止盈区间：{target_sell_min} ~ {target_sell_max}
+- 硬止损价格：{stop} （成本-2%）
+- 卖出窗口：{next_sell_day} 起
+- 预估净利：{net_profit_min} ~ {net_profit_max}
+- 止损预估亏损：{net_stop_loss}
+- 历史样本：{int(stock['signals'])}
 - 次日收盘胜率：{safe_float(stock['win_rate']):.1f}%
 - 目标250命中率：{safe_float(stock['target_250_hit_rate']):.1f}%
 - 目标350命中率：{safe_float(stock['target_350_hit_rate']):.1f}%
@@ -493,7 +486,7 @@ content = f"""
 push("低吸稳赢候选", content)
 print(f"今日推荐：{stock['name']}({stock['code']})")
 
-# ========== 自动记录交易日志 ==========
+# ========== 记录日志 ==========
 log_file = "trade_log.csv"
 log_row = {
     "date": today,
