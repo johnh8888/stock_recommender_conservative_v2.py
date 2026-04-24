@@ -23,15 +23,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install akshare numpy pandas requests
 
-      - name: 配置 PushPlus Token
-        run: echo "PUSHPLUS_TOKEN=${{ secrets.PUSHPLUS_TOKEN }}" >> $GITHUB_ENV
+      - name: 运行稳赢选股脚本
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          TEST_MODE: 0
+        run: python stable_selector.py
 
-      - name: 运行选股脚本
-        run: python stock_recommender_conservative_v2.py
-
-      - name: 上传推荐历史记录（可选）
-        uses: actions/upload-artifact@v4
-        with:
-          name: recommendation-history
-          path: recommend_history.csv
-          retention-days: 7
+      - name: 提交交易日志到仓库
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add trade_log.csv
+          git commit -m "更新交易日志 $(TZ='Asia/Shanghai' date +'%Y%m%d')" || echo "无变更"
+          git push
