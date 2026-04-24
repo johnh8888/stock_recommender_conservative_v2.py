@@ -26,7 +26,7 @@ jobs:
       - name: 运行稳赢选股脚本
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          TEST_MODE: 0
+          TEST_MODE: 1
         run: python stock_recommender_conservative_v2.py
 
       - name: 提交交易日志
