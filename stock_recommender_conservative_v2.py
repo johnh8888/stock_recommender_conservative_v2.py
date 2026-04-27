@@ -97,8 +97,8 @@ def get_col(df, col, default=np.nan):
 
 
 def calc_open_pct(row):
-    prev_close = safe_float(row.get("昨收"), 0.0)
-    open_price = safe_float(row.get("今开"), 0.0)
+    prev_close = safe_float(row.get("prev_close"), 0.0)
+    open_price = safe_float(row.get("open"), 0.0)
     if prev_close <= 0 or open_price <= 0:
         return np.nan
     return (open_price / prev_close - 1) * 100
@@ -291,6 +291,61 @@ def evaluate_stock_history(symbol: str) -> dict:
     }
 
 
+# ==================== 获取行情（双接口容错） ====================
+def fetch_spot_data():
+    """
+    优先使用东方财富接口，失败后切换至新浪接口，并统一为后续代码需要的列名。
+    """
+    # 尝试东方财富
+    for attempt in range(1, 3):
+        try:
+            print(f"尝试东方财富行情，第{attempt}次...")
+            raw = ak.stock_zh_a_spot_em()
+            if raw is not None and not raw.empty:
+                print("东方财富行情获取成功")
+                # 统一列名
+                raw = raw.rename(columns={
+                    "代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct",
+                    "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude",
+                    "今开": "open", "昨收": "prev_close"
+                })
+                # 补充行业信息（如果有）
+                return raw
+        except Exception as e:
+            print(f"失败: {e}")
+            time.sleep(3)
+
+    # 切换到新浪接口
+    try:
+        print("尝试新浪行情...")
+        raw = ak.stock_zh_a_spot()
+        if raw is None or raw.empty:
+            print("新浪行情也为空")
+            return pd.DataFrame()
+        # 新浪列名: code, name, trade(最新价), pricechange, changepercent, amount, volume,
+        # amplitude, turnoverratio, open, high, low, pre_close, ...
+        raw = raw.rename(columns={
+            "code": "code", "name": "name", "trade": "price",
+            "changepercent": "pct", "amount": "amount",
+            "turnoverratio": "turnover", "amplitude": "amplitude",
+            "open": "open", "pre_close": "prev_close"
+        })
+        # 计算量比（近似：当日成交量 / 5日均量）
+        if "volume" in raw.columns:
+            # 生成5日均量需要历史数据，此处简单估算：受限于运行时间，直接用1.0替代
+            raw["lb"] = 1.0
+        else:
+            raw["lb"] = 1.0
+        # 确保数值列
+        for col in ["pct", "amount", "turnover", "amplitude", "price", "open", "prev_close"]:
+            raw[col] = pd.to_numeric(raw[col], errors="coerce")
+        print("新浪行情获取成功，量比设置为1.0 (近似)")
+        return raw
+    except Exception as e:
+        print(f"新浪行情获取失败: {e}")
+        return pd.DataFrame()
+
+
 # ==================== 主流程 ====================
 if not TEST_MODE:
     in_morning = (week_num in TRADE_WEEKDAYS) and (MORNING_START <= current_hour < MORNING_END)
@@ -311,26 +366,16 @@ if MA20_FILTER:
     if not ma_safe and TEST_MODE:
         print("⚠️ 测试模式：大盘未满足安全条件，但继续执行")
 
-# ---------- 获取全A实时行情（带重试） ----------
-max_retries = 3
-raw_df = None
-for attempt in range(1, max_retries + 1):
-    try:
-        raw_df = ak.stock_zh_a_spot_em()
-        if raw_df is not None and not raw_df.empty:
-            break
-        print(f"第 {attempt} 次获取行情为空，重试...")
-    except Exception as e:
-        print(f"获取行情失败，第 {attempt} 次重试... ({e})")
-        time.sleep(5)
-else:
-    print("多次尝试后仍无法获取行情，退出")
+# 获取行情
+raw_df = fetch_spot_data()
+if raw_df.empty:
+    print("所有行情接口均不可用，退出")
     sys.exit(0)
 
 # 大盘涨跌幅
 try:
-    sh_row = raw_df[raw_df["名称"] == "上证指数"]
-    market_pct = float(sh_row["涨跌幅"].iloc[0]) if not sh_row.empty else 0.0
+    sh_row = raw_df[raw_df["name"] == "上证指数"]
+    market_pct = float(sh_row["pct"].iloc[0]) if not sh_row.empty else 0.0
 except Exception:
     market_pct = 0.0
 
@@ -339,12 +384,8 @@ if market_is_weak(market_pct):
     sys.exit(0)
 
 # 数据清洗
-df = raw_df.rename(columns={
-    "代码": "code", "名称": "name", "最新价": "price", "涨跌幅": "pct",
-    "成交额": "amount", "量比": "lb", "换手率": "turnover", "振幅": "amplitude",
-    "今开": "open", "昨收": "prev_close"
-}).copy()
-df["open_pct"] = raw_df.apply(calc_open_pct, axis=1)
+df = raw_df.copy()
+df["open_pct"] = df.apply(calc_open_pct, axis=1)
 for col_name in ["turnover", "amplitude", "open_pct"]:
     df[col_name] = get_col(df, col_name, np.nan)
 
@@ -353,13 +394,12 @@ ban_pattern = r"(^ST|^\*ST|退市|^N|^C[^N]|XD|XR)"
 df = df[~df["name"].str.contains(ban_pattern, na=False, regex=True)]
 df = df[(df["code"].astype(str).str.startswith(("60", "00")))]
 
-# 行业板块效应
+# 行业板块效应（沿用之前逻辑）
 sector_map = get_sector_rank_map()
 if sector_map:
     sector_pcts = sorted(sector_map.values(), reverse=True)
     cutoff_idx = int(len(sector_pcts) * 0.4)
     cutoff_pct = sector_pcts[cutoff_idx] if len(sector_pcts) > 0 else -100
-    # 尝试匹配行业列
     sector_col = None
     for col_name in ["行业", "所属行业"]:
         if col_name in raw_df.columns:
