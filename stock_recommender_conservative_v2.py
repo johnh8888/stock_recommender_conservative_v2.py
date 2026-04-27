@@ -12,7 +12,7 @@ import requests
 
 warnings.filterwarnings("ignore")
 
-# ==================== 配置参数 ====================
+# ==================== 可调节配置（重要） ====================
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN")
 TEST_MODE = os.getenv("TEST_MODE", "1") == "1"
 
@@ -25,7 +25,7 @@ MORNING_START, MORNING_END = 10, 10.67
 AFTERNOON_START, AFTERNOON_END = 14.67, 14.92
 TRADE_WEEKDAYS = {0, 1, 2, 3}
 
-# 风控参数
+# 风控
 LOW_BUY_RATIO = 0.997
 HARD_STOP_RATIO = -0.02
 MAX_ACCEPTABLE_MARKET_DROP = -0.35
@@ -38,29 +38,34 @@ ROUND_TRIP_FEE_RATE = BUY_FEE_RATE + SELL_FEE_RATE + SELL_TAX_RATE
 NET_PROFIT_TARGET_MIN = 250
 NET_PROFIT_TARGET_MAX = 350
 
-# 早盘筛选条件
+# ---------- 过滤开关 ----------
+MA20_FILTER = False               # 大盘20日线过滤（近期建议关闭）
+SECTOR_FILTER_ENABLED = False     # 板块排名过滤（关闭可大幅增加候选）
+CONSECUTIVE_UP_ENABLED = False    # 连续小阳过滤（关闭可避免误杀）
+
+# 筛选数值参数（微量放宽）
 MIN_PRICE, MAX_PRICE = 8, 30
-MIN_PCT, MAX_PCT = 1.2, 5.5
-MIN_AMOUNT = 1.8e8
+EARLY_MIN_PCT = 0.8               # 早盘涨幅下限放宽到0.8%
+MIN_AMOUNT = 1.5e8                # 成交额下限微降到1.5亿
 MIN_LB, MAX_LB = 1.0, 2.5
-MIN_TURNOVER, MAX_TURNOVER = 2.5, 9.0
+MIN_TURNOVER, MAX_TURNOVER = 2.0, 9.0
 MIN_AMPLITUDE, MAX_AMPLITUDE = 1.8, 7.0
 MAX_OPEN_PCT = 2.0
+MAX_PCT = 5.5
 
 # 尾盘条件
 EOD_MAX_PCT = 1.8
-EOD_MIN_PCT = -0.3
+EOD_MIN_PCT = -0.5
 EOD_MAX_TURNOVER = 4.5
 EOD_MIN_LB, EOD_MAX_LB = 0.9, 1.5
 EOD_MAX_AMPLITUDE = 3.5
 
-MIN_SCORE_THRESHOLD = 7.5
+# 技术 & 评分
+MIN_SCORE_THRESHOLD = 7.0
 TOP_N_CANDIDATES = 5
 BACKTEST_LOOKBACK_DAYS = 180
-BACKTEST_MIN_SIGNALS = 4
-MIN_CONSECUTIVE_UP = 3
-
-MA20_FILTER = True
+BACKTEST_MIN_SIGNALS = 3          # 历史信号数降至3
+MIN_CONSECUTIVE_UP = 3            # 若开启连续小阳，仍保留3天
 FUNDAMENTAL_CHECK = True
 
 now = datetime.utcnow() + timedelta(hours=8)
@@ -79,7 +84,6 @@ def push(title, content):
         except:
             pass
 
-
 def safe_float(value, default=0.0):
     try:
         if pd.isna(value): return default
@@ -87,17 +91,14 @@ def safe_float(value, default=0.0):
     except:
         return default
 
-
 def get_col(df, col, default=np.nan):
     return df[col] if col in df.columns else pd.Series([default] * len(df), index=df.index)
-
 
 def calc_open_pct(row):
     prev = safe_float(row.get("prev_close", row.get("昨收")), 0.0)
     opn = safe_float(row.get("open", row.get("今开")), 0.0)
     if prev <= 0 or opn <= 0: return np.nan
     return (opn / prev - 1) * 100
-
 
 def get_next_trade_day_text(base_dt):
     try:
@@ -113,10 +114,8 @@ def get_next_trade_day_text(base_dt):
     while candidate.weekday() >= 5: candidate += timedelta(days=1)
     return candidate.strftime("%Y%m%d")
 
-
 def market_is_weak(market_pct):
     return market_pct <= MAX_ACCEPTABLE_MARKET_DROP
-
 
 def calc_net_profit(sell_price, buy_price, capital):
     if buy_price <= 0 or sell_price <= 0 or capital <= 0: return 0.0
@@ -125,11 +124,9 @@ def calc_net_profit(sell_price, buy_price, capital):
     fees = capital * BUY_FEE_RATE + (shares * sell_price) * (SELL_FEE_RATE + SELL_TAX_RATE)
     return gross - fees
 
-
 def calc_target_sell_price(buy_price, capital, net_profit_target):
     if buy_price <= 0 or capital <= 0: return 0.0
     return round(buy_price * (1 + ROUND_TRIP_FEE_RATE + net_profit_target / capital), 2)
-
 
 def get_market_ma20_safe():
     try:
@@ -142,7 +139,6 @@ def get_market_ma20_safe():
     except:
         return 0, 0, True
 
-
 def get_sector_rank_map():
     try:
         sector_df = ak.stock_board_industry_name_em()
@@ -150,8 +146,8 @@ def get_sector_rank_map():
     except:
         return {}
 
-
 def has_consecutive_mild_up(code, days=MIN_CONSECUTIVE_UP):
+    if not CONSECUTIVE_UP_ENABLED: return True
     try:
         end = (now - timedelta(days=1)).strftime("%Y%m%d")
         start = (now - timedelta(days=30)).strftime("%Y%m%d")
@@ -167,7 +163,6 @@ def has_consecutive_mild_up(code, days=MIN_CONSECUTIVE_UP):
     except:
         return False
 
-
 def has_safe_fundamentals(code):
     try:
         info = ak.stock_individual_info_em(symbol=code)
@@ -176,7 +171,6 @@ def has_safe_fundamentals(code):
         return safe_float(info_dict.get("归属母公司股东的净利润", 0)) > 0
     except:
         return True
-
 
 def evaluate_stock_history(symbol):
     start_date = (now - timedelta(days=BACKTEST_LOOKBACK_DAYS + 40)).strftime("%Y%m%d")
@@ -202,7 +196,7 @@ def evaluate_stock_history(symbol):
     for i in range(1, len(hist) - 1):
         row = hist.iloc[i]
         nxt = hist.iloc[i + 1]
-        if not (MIN_PCT <= safe_float(row["pct"]) <= MAX_PCT and
+        if not (EARLY_MIN_PCT <= safe_float(row["pct"]) <= MAX_PCT and
                 safe_float(row["amount"]) >= MIN_AMOUNT and
                 MIN_TURNOVER <= safe_float(row.get("turnover"), 0) <= MAX_TURNOVER and
                 MIN_AMPLITUDE <= safe_float(row.get("amplitude"), 0) <= MAX_AMPLITUDE and
@@ -248,19 +242,13 @@ def evaluate_stock_history(symbol):
             "avg_next_high": avg_h, "avg_worst_drawdown": avg_l, "history_score": score}
 
 
-# ==================== 行情获取（动态列映射，双源容错） ====================
+# ---------- 行情获取（双源容错） ----------
 def fetch_spot_data():
-    """
-    优先东方财富，失败后使用新浪（动态识别列名）
-    返回标准化DataFrame，包含：code, name, price, pct, amount, lb, turnover, amplitude, open, prev_close
-    """
-    # 尝试东方财富
     for attempt in range(1, 3):
         try:
             print(f"东方财富行情，第{attempt}次...")
             raw = ak.stock_zh_a_spot_em()
             if raw is not None and not raw.empty:
-                # 东方财富标准列名：代码、名称、最新价、涨跌幅、成交额、量比、换手率、振幅、今开、昨收
                 standard = pd.DataFrame()
                 standard["code"] = raw["代码"]
                 standard["name"] = raw["名称"]
@@ -272,71 +260,29 @@ def fetch_spot_data():
                 standard["amplitude"] = raw["振幅"].astype(float)
                 standard["open"] = raw["今开"].astype(float)
                 standard["prev_close"] = raw["昨收"].astype(float)
-                # 保留行业列（若有）
                 for col in ["行业", "所属行业"]:
-                    if col in raw.columns:
-                        standard[col] = raw[col]
+                    if col in raw.columns: standard[col] = raw[col]
                 print("东方财富行情成功")
                 return standard
         except Exception as e:
             print(f"失败: {e}")
             time.sleep(3)
 
-    # 切换新浪
     try:
         print("尝试新浪行情...")
         raw = ak.stock_zh_a_spot()
-        if raw is None or raw.empty:
-            print("新浪返回空")
-            return pd.DataFrame()
-
-        # 动态列名映射表（中英文对照）
-        name_map = {
-            "代码": "code", "名称": "name",
-            "最新价": "price", "涨跌幅": "pct", "成交额": "amount",
-            "换手率": "turnover", "振幅": "amplitude", "开盘": "open",
-            "昨收": "prev_close", "成交量": "volume", "量比": "lb"
-        }
-        # 先统一列名（只映射存在的列）
+        if raw is None or raw.empty: return pd.DataFrame()
         standard = pd.DataFrame()
-        for raw_col, target_col in name_map.items():
-            if raw_col in raw.columns:
-                standard[target_col] = raw[raw_col]
-        # 如果缺少关键列，尝试其他名称
-        if "pct" not in standard.columns:
-            if "涨跌幅" in raw.columns:
-                standard["pct"] = raw["涨跌幅"]
-        if "lb" not in standard.columns:
-            if "量比" in standard.columns:
-                pass
-            else:
-                standard["lb"] = 1.0  # 默认中性值
-        if "open" not in standard.columns and "今开" in raw.columns:
-            standard["open"] = raw["今开"]
-        if "prev_close" not in standard.columns and "昨收" not in standard.columns:
-            if "昨收" in raw.columns:
-                standard["prev_close"] = raw["昨收"]
-
-        # 确保数据类型
-        for col in ["price", "pct", "amount", "lb", "turnover", "amplitude", "open", "prev_close"]:
-            if col in standard.columns:
-                standard[col] = pd.to_numeric(standard[col], errors="coerce")
-
-        # 补充缺失列
-        if "turnover" not in standard.columns:
-            standard["turnover"] = 0.0
-        if "amplitude" not in standard.columns:
-            standard["amplitude"] = 0.0
-        if "open" not in standard.columns:
-            standard["open"] = standard["price"]
-        if "prev_close" not in standard.columns:
-            standard["prev_close"] = standard["open"]
-
-        # 保留行业信息
-        for col in ["行业", "所属行业"]:
-            if col in raw.columns:
-                standard[col] = raw[col]
-
+        standard["code"] = raw["代码"]
+        standard["name"] = raw["名称"]
+        standard["price"] = pd.to_numeric(raw["最新价"], errors="coerce")
+        standard["pct"] = pd.to_numeric(raw["涨跌幅"], errors="coerce")
+        standard["amount"] = pd.to_numeric(raw["成交额"], errors="coerce")
+        standard["lb"] = 1.0
+        standard["turnover"] = pd.to_numeric(raw.get("换手率", 0), errors="coerce")
+        standard["amplitude"] = pd.to_numeric(raw.get("振幅", 0), errors="coerce")
+        standard["open"] = pd.to_numeric(raw.get("今开", raw["最新价"]), errors="coerce")
+        standard["prev_close"] = pd.to_numeric(raw.get("昨收", raw["最新价"]), errors="coerce")
         print("新浪行情成功")
         return standard
     except Exception as e:
@@ -361,15 +307,13 @@ if MA20_FILTER:
         print("大盘不在20日线上方或均线未向上，暂停开仓")
         sys.exit(0)
     if not ma_safe and TEST_MODE:
-        print("⚠️ 测试模式：大盘未满足安全条件，继续运行")
+        print("⚠️ 测试模式：大盘均线不满足，但仍继续运行")
 
-# 获取行情
 raw_df = fetch_spot_data()
 if raw_df.empty:
     print("所有行情接口均不可用，退出")
     sys.exit(0)
 
-# 寻找上证指数行
 market_pct = 0.0
 name_col = "name"
 if name_col in raw_df.columns:
@@ -381,50 +325,48 @@ if market_is_weak(market_pct):
     print(f"市场跌幅{market_pct:.2f}%过深，空仓")
     sys.exit(0)
 
-# 数据清洗
 df = raw_df.copy()
 df["open_pct"] = df.apply(calc_open_pct, axis=1)
 for col_name in ["turnover", "amplitude", "open_pct"]:
     df[col_name] = get_col(df, col_name, np.nan)
 
-# 排除ST/新股
 ban_pattern = r"(^ST|^\*ST|退市|^N|^C[^N]|XD|XR)"
 df = df[~df["name"].str.contains(ban_pattern, na=False, regex=True)]
 df = df[(df["code"].astype(str).str.startswith(("60", "00")))]
 
-# 板块效应
-sector_map = get_sector_rank_map()
-if sector_map:
-    sector_pcts = sorted(sector_map.values(), reverse=True)
-    cutoff_idx = int(len(sector_pcts) * 0.4)
-    cutoff_pct = sector_pcts[cutoff_idx] if sector_pcts else -100
-    sector_col = None
-    for col_name in ["行业", "所属行业"]:
-        if col_name in df.columns:
-            sector_col = col_name
-            break
-    if sector_col:
-        df["sector_pct"] = df[sector_col].map(sector_map)
-        df = df[df["sector_pct"].notna() & (df["sector_pct"] >= cutoff_pct)]
+# 板块过滤（可关闭）
+if SECTOR_FILTER_ENABLED:
+    sector_map = get_sector_rank_map()
+    if sector_map:
+        sector_pcts = sorted(sector_map.values(), reverse=True)
+        cutoff_idx = int(len(sector_pcts) * 0.4)
+        cutoff_pct = sector_pcts[cutoff_idx] if sector_pcts else -100
+        sector_col = None
+        for col_name in ["行业", "所属行业"]:
+            if col_name in df.columns:
+                sector_col = col_name
+                break
+        if sector_col:
+            df["sector_pct"] = df[sector_col].map(sector_map)
+            df = df[df["sector_pct"].notna() & (df["sector_pct"] >= cutoff_pct)]
 
 # 早盘筛选
 if in_morning:
     filtered = df[
         (df["price"] >= MIN_PRICE) & (df["price"] <= MAX_PRICE) &
-        (df["pct"] >= MIN_PCT) & (df["pct"] <= MAX_PCT) &
+        (df["pct"] >= EARLY_MIN_PCT) & (df["pct"] <= MAX_PCT) &
         (df["amount"] >= MIN_AMOUNT) &
         (df["lb"] >= MIN_LB) & (df["lb"] <= MAX_LB) &
         (df["turnover"] >= MIN_TURNOVER) & (df["turnover"] <= MAX_TURNOVER) &
         (df["amplitude"] >= MIN_AMPLITUDE) & (df["amplitude"] <= MAX_AMPLITUDE) &
         (df["open_pct"] <= MAX_OPEN_PCT)
     ].copy()
-    if MIN_CONSECUTIVE_UP > 0:
+    if CONSECUTIVE_UP_ENABLED:
         filtered = filtered[filtered["code"].apply(has_consecutive_mild_up)]
     print(f"早盘初步筛选出 {len(filtered)} 只")
 else:
     filtered = pd.DataFrame()
 
-# 尾盘补充
 if (filtered.empty and not in_morning) or in_afternoon:
     print("切换到尾盘防御模式...")
     filtered_eod = df[
@@ -435,7 +377,7 @@ if (filtered.empty and not in_morning) or in_afternoon:
         (df["turnover"] <= EOD_MAX_TURNOVER) &
         (df["amplitude"] <= EOD_MAX_AMPLITUDE)
     ].copy()
-    if MIN_CONSECUTIVE_UP > 0:
+    if CONSECUTIVE_UP_ENABLED:
         filtered_eod = filtered_eod[filtered_eod["code"].apply(has_consecutive_mild_up)]
     filtered = filtered_eod
     print(f"尾盘初步筛选出 {len(filtered)} 只")
@@ -444,7 +386,6 @@ if filtered.empty:
     print("今日无标的，空仓")
     sys.exit(0)
 
-# 实时评分
 filtered["realtime_score"] = (
     filtered["pct"] * 1.3 +
     filtered["lb"] * 2.0 +
@@ -455,11 +396,7 @@ filtered["realtime_score"] = (
 )
 
 candidates = filtered.sort_values("realtime_score", ascending=False).head(TOP_N_CANDIDATES).copy()
-if candidates.empty:
-    print("无候选")
-    sys.exit(0)
 
-# 历史回测 + 基本面
 history_rows, valid_idx = [], []
 for idx, row in candidates.iterrows():
     code = str(row["code"])
@@ -515,9 +452,9 @@ content = f"""
 ## {today} 低吸稳赢候选
 - 股票：{stock['name']}({stock['code']})
 - 现价：{p:.2f}
-- 计划低吸买入参考：{buy_ref} （折扣{LOW_BUY_RATIO*100:.1f}%）
+- 计划低吸买入参考：{buy_ref}
 - 止盈区间：{target_sell_min} ~ {target_sell_max}
-- 硬止损价格：{stop} （成本-2%）
+- 硬止损价格：{stop}
 - 卖出窗口：{next_sell_day} 起
 - 预估净利：{net_profit_min} ~ {net_profit_max}
 - 止损预估亏损：{net_stop_loss}
@@ -533,7 +470,6 @@ content = f"""
 push("低吸稳赢候选", content)
 print(f"今日推荐：{stock['name']}({stock['code']})")
 
-# 日志记录
 log_file = "trade_log.csv"
 log_row = {
     "date": today, "time_window": "morning" if in_morning else "afternoon",
