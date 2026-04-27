@@ -1,6 +1,7 @@
 import csv
 import os
 import sys
+import time
 import warnings
 from datetime import datetime, timedelta
 
@@ -310,13 +311,23 @@ if MA20_FILTER:
     if not ma_safe and TEST_MODE:
         print("⚠️ 测试模式：大盘未满足安全条件，但继续执行")
 
-# 获取全A实时行情
-try:
-    raw_df = ak.stock_zh_a_spot_em()
-except Exception as e:
-    print(f"获取行情失败: {e}")
+# ---------- 获取全A实时行情（带重试） ----------
+max_retries = 3
+raw_df = None
+for attempt in range(1, max_retries + 1):
+    try:
+        raw_df = ak.stock_zh_a_spot_em()
+        if raw_df is not None and not raw_df.empty:
+            break
+        print(f"第 {attempt} 次获取行情为空，重试...")
+    except Exception as e:
+        print(f"获取行情失败，第 {attempt} 次重试... ({e})")
+        time.sleep(5)
+else:
+    print("多次尝试后仍无法获取行情，退出")
     sys.exit(0)
 
+# 大盘涨跌幅
 try:
     sh_row = raw_df[raw_df["名称"] == "上证指数"]
     market_pct = float(sh_row["涨跌幅"].iloc[0]) if not sh_row.empty else 0.0
@@ -334,8 +345,8 @@ df = raw_df.rename(columns={
     "今开": "open", "昨收": "prev_close"
 }).copy()
 df["open_pct"] = raw_df.apply(calc_open_pct, axis=1)
-for col in ["turnover", "amplitude", "open_pct"]:
-    df[col] = get_col(df, col, np.nan)
+for col_name in ["turnover", "amplitude", "open_pct"]:
+    df[col_name] = get_col(df, col_name, np.nan)
 
 # 排除ST/新股等
 ban_pattern = r"(^ST|^\*ST|退市|^N|^C[^N]|XD|XR)"
